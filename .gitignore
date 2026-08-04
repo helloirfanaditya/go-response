@@ -1,0 +1,22 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binaries and coverage output
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Go workspace files
+go.work
+go.work.sum
+
+# Vendor directory (if vendoring is used)
+vendor/
+
+# macOS
+.DS_Store
