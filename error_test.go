@@ -1,6 +1,7 @@
 package response
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -130,5 +131,56 @@ func TestNewError(t *testing.T) {
 	Error(c, e)
 	if w.Code != http.StatusTeapot {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusTeapot)
+	}
+}
+
+func TestNewValidationError(t *testing.T) {
+	e := NewValidationError("transfer rejected",
+		FieldError{Field: "amount", Code: "TRANSACTION_EXCEEDS_LIMIT", Params: map[string]any{"max": 5000000}},
+		FieldError{Field: "recipient", Code: "TRANSACTION_ACCOUNT_BLOCKED"},
+	)
+
+	if e.Error() != "transfer rejected" {
+		t.Errorf("Error() = %q, want %q", e.Error(), "transfer rejected")
+	}
+
+	c, w := newContext()
+	Error(c, e)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusUnprocessableEntity)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid JSON body %q: %v", w.Body.String(), err)
+	}
+	if body["code"] != CodeValidationError {
+		t.Errorf("code = %v, want %v", body["code"], CodeValidationError)
+	}
+	if body["message"] != "transfer rejected" {
+		t.Errorf("message = %v, want %q", body["message"], "transfer rejected")
+	}
+
+	fields, ok := body["errors"].([]any)
+	if !ok {
+		t.Fatalf("errors = %v, want a list", body["errors"])
+	}
+	if len(fields) != 2 {
+		t.Fatalf("len(errors) = %d, want 2", len(fields))
+	}
+
+	first := fields[0].(map[string]any)
+	if first["field"] != "amount" || first["code"] != "TRANSACTION_EXCEEDS_LIMIT" {
+		t.Errorf("first error = %v, want amount/TRANSACTION_EXCEEDS_LIMIT", first)
+	}
+	if params, ok := first["params"].(map[string]any); !ok || params["max"] != float64(5000000) {
+		t.Errorf("first params = %v, want max=5000000", first["params"])
+	}
+}
+
+func TestNewValidationErrorEmptyMessage(t *testing.T) {
+	e := NewValidationError("", FieldError{Field: "x", Code: "ERR_X"})
+	if e.Error() != messageValidationFailed {
+		t.Errorf("Error() = %q, want default %q", e.Error(), messageValidationFailed)
 	}
 }

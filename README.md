@@ -128,6 +128,7 @@ Unused fields are never included in the payload.
 | `response.Created(c, data)` | 201 | `CREATED` |
 | `response.NoContent(c)` | 204 | — (no body) |
 | `response.Validation(c, &req, err)` | 422 | `VALIDATION_ERROR` |
+| `response.NewValidationError(msg, fields...)` | 422 | `VALIDATION_ERROR` |
 | `response.Error(c, err)` | mapped | mapped |
 | `response.Paginate(c, data, meta)` | 200 | `SUCCESS` |
 
@@ -163,6 +164,103 @@ func (rateLimitedError) ResponseCode() string { return "RATE_LIMITED" }
 // in a handler:
 response.Error(c, rateLimitedError{})
 ```
+
+## Domain-Specific Error Codes
+
+The generic constructors (`BadRequest`, `NotFound`, ...) are convenient, but
+for a production API you usually want **stable, machine-readable codes per
+domain** — clients use them for localization and UI logic, so they must never
+change between releases.
+
+Use `response.NewError(status, code, message)` to build errors with your own
+code:
+
+```go
+import "net/http"
+
+var (
+	ErrInvalidAmount       = response.NewError(http.StatusBadRequest, "TRANSACTION_INVALID_AMOUNT", "amount must be greater than zero")
+	ErrInsufficientBalance = response.NewError(http.StatusBadRequest, "TRANSACTION_INSUFFICIENT_BALANCE", "insufficient balance")
+	ErrRecipientNotFound   = response.NewError(http.StatusNotFound, "TRANSACTION_RECIPIENT_NOT_FOUND", "recipient account not found")
+	ErrStoreFailed         = response.NewError(http.StatusInternalServerError, "TRANSACTION_STORE_FAILED", "failed to store transaction")
+)
+```
+
+```go
+// in a handler:
+resp, err := h.svc.Transfer(req)
+if err != nil {
+	response.Error(c, err)
+	return
+}
+response.Success(c, gin.H{"transaction_id": resp})
+```
+
+Response:
+
+```json
+{
+	"success": false,
+	"code": "TRANSACTION_INSUFFICIENT_BALANCE",
+	"message": "insufficient balance"
+}
+```
+
+Rules of thumb:
+
+- Codes are `UPPER_SNAKE_CASE` and prefixed by domain (`TRANSACTION_`, `USER_`, `ORDER_`, ...)
+- `code` is the contract between server and client — never parse `message`
+- Server-side failures (storage, third-party APIs) should map to `500`, not `400`
+
+### Field-Level Errors (Business Rules)
+
+Validator tags can't express every rule. When business logic rejects a request
+with reasons tied to specific fields, build the error with `[]FieldError`
+using `response.NewValidationError`:
+
+```go
+response.Error(c, response.NewValidationError("transfer rejected",
+	response.FieldError{
+		Field: "amount",
+		Code:  "TRANSACTION_EXCEEDS_LIMIT",
+		Params: map[string]any{"max": 5000000},
+	},
+	response.FieldError{
+		Field: "recipient",
+		Code:  "TRANSACTION_ACCOUNT_BLOCKED",
+	},
+))
+```
+
+Response:
+
+```json
+{
+	"success": false,
+	"code": "VALIDATION_ERROR",
+	"message": "transfer rejected",
+	"errors": [
+		{
+			"field": "amount",
+			"code": "TRANSACTION_EXCEEDS_LIMIT",
+			"params": {
+				"max": 5000000
+			}
+		},
+		{
+			"field": "recipient",
+			"code": "TRANSACTION_ACCOUNT_BLOCKED"
+		}
+	]
+}
+```
+
+`FieldError` has the same shape as the validation errors produced by
+`response.Validation`, so clients handle both identically.
+
+Custom errors can also carry field errors by implementing `ErrorCoder` **and**
+`FieldErrorProvider` (`FieldErrors() []FieldError`) — `response.Error` picks
+both up automatically.
 
 ## Validation
 
@@ -292,6 +390,100 @@ responsibility. Every built-in validator tag maps to a code:
 Comparison tags (`len`, `min`, `max`, `eq`, `ne`, `lt`, `lte`, `gt`, `gte`),
 cross-field tags, `oneof`, `datetime`, and content tags carry their bound or
 reference in `params`.
+
+### Conditional and Cross-Field Validation
+
+Rules can depend on other fields in the same request. Everything below stays
+machine-readable and maps to the same code table.
+
+**Conditional presence** — a field is only required when another field has a
+certain value:
+
+```go
+type paymentRequest struct {
+	Method string `json:"method" validate:"required,oneof=transfer credit_card"`
+	Card   string `json:"card" validate:"required_if=Method credit_card"`
+}
+```
+
+Request `{"method": "credit_card"}`:
+
+```json
+{
+	"success": false,
+	"code": "VALIDATION_ERROR",
+	"message": "Validation failed",
+	"errors": [
+		{
+			"field": "card",
+			"code": "ERR_REQUIRED"
+		}
+	]
+}
+```
+
+**Cross-field comparison** — a field must match (or differ from) another field:
+
+```go
+type registerRequest struct {
+	Password        string `json:"password" validate:"required,min=8"`
+	ConfirmPassword string `json:"confirm_password" validate:"required,eqfield=Password"`
+}
+```
+
+Request `{"password": "supersecret", "confirm_password": "different"}`:
+
+```json
+{
+	"success": false,
+	"code": "VALIDATION_ERROR",
+	"message": "Validation failed",
+	"errors": [
+		{
+			"field": "confirm_password",
+			"code": "ERR_MISMATCH",
+			"params": {
+				"eqfield": "Password"
+			}
+		}
+	]
+}
+```
+
+**Custom tags** — validators registered with `RegisterValidation` map to
+`ERR_INVALID`:
+
+```go
+// in init():
+v := binding.Validator.Engine().(*validator.Validate)
+_ = v.RegisterValidation("no_spaces", func(fl validator.FieldLevel) bool {
+	return !strings.Contains(fl.Field().String(), " ")
+})
+
+type usernameRequest struct {
+	Username string `json:"username" validate:"required,no_spaces"`
+}
+```
+
+Request `{"username": "has space"}`:
+
+```json
+{
+	"success": false,
+	"code": "VALIDATION_ERROR",
+	"message": "Validation failed",
+	"errors": [
+		{
+			"field": "username",
+			"code": "ERR_INVALID"
+		}
+	]
+}
+```
+
+> Both `binding:"required"` (Gin) and `validate:"required"` (validator) produce
+> `validator.ValidationErrors`, so `response.Validation` handles them the same
+> way. Prefer `validate` tags so the mapping table applies uniformly.
 
 ## Pagination
 

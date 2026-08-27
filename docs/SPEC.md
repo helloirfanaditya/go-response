@@ -68,9 +68,13 @@ response.NoContent(c)
 
 response.Validation(c, &request, err)
 
+response.NewValidationError(message, fields...)
+
 response.Error(c, err)
 
 response.Paginate(c, data, meta)
+
+response.NewError(status, code, message)
 ```
 
 Avoid adding new exported functions unless absolutely necessary.
